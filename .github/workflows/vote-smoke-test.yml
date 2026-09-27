@@ -1,0 +1,38 @@
+name: Vote Image Smoke Test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  vote-smoke-test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Build vote image
+        run: docker build -t vote-app:test ./vote
+      - name: Run vote container
+        run: docker run -d --name vote-test -p 8080:80 vote-app:test
+      - name: Wait for app to be ready and check HTTP 200
+        run: |
+          for i in $(seq 1 15); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || echo "000")
+            if [ "$status" = "200" ]; then
+              echo "App responded with HTTP 200 on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: got status $status, retrying in 2s..."
+            sleep 2
+          done
+          echo "App did not respond with HTTP 200 within the timeout"
+          exit 1
+      - name: Show container logs on failure
+        if: failure()
+        run: docker logs vote-test
+
+      - name: Clean up container
+        if: always()
+        run: docker rm -f vote-test
