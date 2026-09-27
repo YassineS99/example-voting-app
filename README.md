@@ -1,65 +1,76 @@
-# Example Voting App
+# PR Smoke Test — Vote Service
 
-A simple distributed application running across multiple Docker containers.
+## What this check verifies
 
-## Getting started
+This adds a GitHub Actions workflow (`.github/workflows/vote-smoke-test.yml`) that runs
+automatically on every pull request against this repository. It answers one specific
+question that a successful `docker build` alone cannot answer:
 
-Download [Docker Desktop](https://www.docker.com/products/docker-desktop) for Mac or Windows. [Docker Compose](https://docs.docker.com/compose) will be automatically installed. On Linux, make sure you have the latest version of [Compose](https://docs.docker.com/compose/install/).
+> **Does the resulting `vote` service image actually start and serve traffic?**
 
-This solution uses Python, Node.js, .NET, with Redis for messaging and Postgres for storage.
+A Docker image can build without errors while the process inside it still fails to
+start, crashes on boot, or never binds to its port. This check catches that class of
+problem before merge.
 
-Run in this directory to build and run the app:
+### What it does, step by step
 
-```shell
-docker compose up
+1. Checks out the code proposed in the pull request (not a fixed baseline).
+2. Builds the existing `./vote/Dockerfile` using `./vote` as the build context — no
+   custom or replacement Dockerfile is used.
+3. Starts a container from the newly built image, publishing container port `80` to
+   host port `8080`.
+4. Retries an HTTP GET request to `http://localhost:8080/` for up to ~30 seconds
+   (15 attempts, 2 seconds apart), to allow for normal application startup time.
+5. Requires an HTTP `200` response. A connection failure, timeout, or any non-200
+   status causes the job to fail.
+6. On failure, dumps the container's logs (`docker logs`) before removing it, so the
+   failure is diagnosable directly from the failed CI run.
+7. Always removes the test container afterward, whether the check passed or failed.
+
+### What it does *not* check
+
+This is a smoke test, not a full integration test. It only verifies that the `vote`
+service's root page (`/`) responds with HTTP 200. It does not submit a vote, and does
+not exercise Redis or any other part of the application stack.
+
+## How to rerun it
+
+- **Automatically:** the workflow runs on every pull request (on open, new commits,
+  and reopen) targeting this repository. No action needed.
+- **Manually, from a PR:** open the "Checks" tab on the pull request, select
+  "Vote Image Smoke Test," and use "Re-run all jobs."
+- **Locally**, without GitHub Actions:
+```bash
+  docker build -t vote-app:test ./vote
+  docker run -d --name vote-test -p 8080:80 vote-app:test
+  for i in $(seq 1 15); do
+    status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || echo "000")
+    [ "$status" = "200" ] && echo "OK on attempt $i" && break
+    echo "Attempt $i: $status, retrying..."
+    sleep 2
+  done
+  docker logs vote-test   # if you need to inspect it
+  docker rm -f vote-test
 ```
 
-The `vote` app will be running at [http://localhost:8080](http://localhost:8080), and the `results` will be at [http://localhost:8081](http://localhost:8081).
+## Limitation
 
-Alternately, if you want to run it on a [Docker Swarm](https://docs.docker.com/engine/swarm/), first make sure you have a swarm. If you don't, run:
+The smoke test only checks that the container serves an HTTP 200 on `/`. It doesn't
+verify the page's actual content, doesn't check that voting works end-to-end, and
+doesn't exercise the Redis dependency at all — a container that returns 200 for an
+unrelated or broken reason (e.g. a generic error page misconfigured to return 200)
+would still pass this check.
 
-```shell
-docker swarm init
-```
+## Tested against
 
-Once you have your swarm, in this directory run:
+- **Baseline commit:** `63e9150ca17af4ed05880d4245e486481f73fcb4`
+- **Runner:** GitHub-hosted `ubuntu-24.04`, Actions runner version `2.337.0`
+- **Actions used:** `actions/checkout@v4`
+- **Git:** `2.55.0`
+- **Docker:** as provided by the GitHub-hosted `ubuntu-24.04` runner image (no custom
+  installation required)
+- **Workflow permissions:** `contents: read` only — no secrets, no image publishing,
+  no changes to external infrastructure.
 
-```shell
-docker stack deploy --compose-file docker-stack.yml vote
-```
-
-## Run the app in Kubernetes
-
-The folder k8s-specifications contains the YAML specifications of the Voting App's services.
-
-Run the following command to create the deployments and services. Note it will create these resources in your current namespace (`default` if you haven't changed it.)
-
-```shell
-kubectl create -f k8s-specifications/
-```
-
-The `vote` web app is then available on port 31000 on each host of the cluster, the `result` web app is available on port 31001.
-
-To remove them, run:
-
-```shell
-kubectl delete -f k8s-specifications/
-```
-
-## Architecture
-
-![Architecture diagram](architecture.excalidraw.png)
-
-* A front-end web app in [Python](/vote) which lets you vote between two options
-* A [Redis](https://hub.docker.com/_/redis/) which collects new votes
-* A [.NET](/worker/) worker which consumes votes and stores them in…
-* A [Postgres](https://hub.docker.com/_/postgres/) database backed by a Docker volume
-* A [Node.js](/result) web app which shows the results of the voting in real time
-
-## Notes
-
-The voting application only accepts one vote per client browser. It does not register additional votes if a vote has already been submitted from a client.
-
-This isn't an example of a properly architected perfectly designed distributed app... it's just a simple
-example of the various types of pieces and languages you might see (queues, persistent data, etc), and how to
-deal with them in Docker at a basic level.
+Verified passing pull request: **PR #1** in this fork
+(`YassineS99/example-voting-app`, `assessment-ci` → `main`).
